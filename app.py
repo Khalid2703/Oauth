@@ -1,7 +1,6 @@
 import os
-import json
 import secrets
-from flask import Flask, redirect, request, url_for, session, render_template
+from flask import Flask, redirect, request, url_for, session
 from authlib.integrations.flask_client import OAuth
 from dotenv import load_dotenv
 import requests
@@ -11,12 +10,21 @@ from flask_cors import CORS
 load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = os.urandom(24)
+# It's critical to use a static secret key for session management.
+# Using os.urandom() will generate a new key on each app restart,
+# invalidating all existing user sessions.
+app.secret_key = os.getenv("FLASK_SECRET_KEY")
+if not app.secret_key:
+    raise ValueError("No FLASK_SECRET_KEY set for Flask application")
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID")
 MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET")
+
+# Centralize configuration
+ADMIN_EMAIL_LIST = os.getenv("ADMIN_EMAILS", "admin@example.com,anotheradmin@example.com")
+ADMIN_EMAILS = set(email.strip() for email in ADMIN_EMAIL_LIST.split(','))
 
 oauth = OAuth(app)
 oauth.register(
@@ -50,7 +58,47 @@ def get_db_connection():
     )
     return conn
 
-# Remove the index route and its usage
+def _process_oauth_callback(provider):
+    """A generic helper to process OAuth callbacks, reducing code duplication."""
+    token = provider.authorize_access_token()
+    session["token"] = token
+    userinfo = provider.parse_id_token(token, nonce=session.get("nonce"))
+    session["user"] = {
+        "name": userinfo.get("name"),
+        "email": userinfo.get("email"),
+        "picture": userinfo.get("picture")
+    }
+    role = "admin" if userinfo.get("email") in ADMIN_EMAILS else "user"
+
+    # Use context managers for safer database handling
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO users (name, email, picture, access_token, id_token, role)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        name=VALUES(name),
+                        picture=VALUES(picture),
+                        access_token=VALUES(access_token),
+                        id_token=VALUES(id_token),
+                        role=VALUES(role)
+                """, (
+                    userinfo.get("name"),
+                    userinfo.get("email"),
+                    userinfo.get("picture"),
+                    token.get("access_token"),
+                    token.get("id_token"),
+                    role
+                ))
+                conn.commit()
+    except mysql.connector.Error as err:
+        app.logger.error(f"Database error during OAuth callback: {err}")
+        return "A database error occurred. Please try again later.", 500
+
+    REDIRECT_ADMIN_URL = os.getenv("REDIRECT_ADMIN_URL", "http://localhost:3000/admin")
+    REDIRECT_SELECTION_URL = os.getenv("REDIRECT_SELECTION_URL", "http://localhost:3000/selection")
+    return redirect(REDIRECT_ADMIN_URL) if role == "admin" else redirect(REDIRECT_SELECTION_URL)
 
 @app.route("/login")
 def login():
@@ -62,63 +110,13 @@ def login():
 
 @app.route("/callback")
 def callback():
-    # Get token and parse user info
-    token = oauth.google.authorize_access_token()
-    session["token"] = token  # Save token in session for later use
-
-    userinfo = oauth.google.parse_id_token(token, nonce=session.get("nonce"))
-
-    # Save info to session
-    session["user"] = {
-        "name": userinfo["name"],
-        "email": userinfo["email"],
-        "picture": userinfo["picture"]
-    }
-
-    admin_emails = {"admin@example.com", "anotheradmin@example.com"}  # Add all admin emails here
-
-    # Determine role
-    if userinfo["email"] in admin_emails:
-        role = "admin"
-    else:
-        role = "user"
-
-    # Save to MySQL database (always update role on login)
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO users (name, email, picture, access_token, id_token, role)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE
-            name=VALUES(name),
-            picture=VALUES(picture),
-            access_token=VALUES(access_token),
-            id_token=VALUES(id_token),
-            role=VALUES(role)
-    """, (
-        userinfo["name"],
-        userinfo["email"],
-        userinfo["picture"],
-        token.get("access_token"),
-        token.get("id_token"),
-        role
-    ))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    # Redirect based on role
-    REDIRECT_ADMIN_URL = os.getenv("REDIRECT_ADMIN_URL", "http://localhost:3000/admin")
-    REDIRECT_SELECTION_URL = os.getenv("REDIRECT_SELECTION_URL", "http://localhost:3000/selection")
-    if role == "admin":
-        return redirect(REDIRECT_ADMIN_URL)
-    else:
-        return redirect(REDIRECT_SELECTION_URL)
+    return _process_oauth_callback(oauth.google)
 
 @app.route("/logout")
 def logout():
     session.clear()
     return "Logged out. You may close this window."
+
 # Microsoft OAuth login route
 @app.route("/login-microsoft")
 def login_microsoft():
@@ -131,92 +129,50 @@ def login_microsoft():
 # Microsoft OAuth callback route
 @app.route("/callback-microsoft")
 def callback_microsoft():
-    token = oauth.microsoft.authorize_access_token()
-    session["token"] = token
-    userinfo = oauth.microsoft.parse_id_token(token, nonce=session.get("nonce"))
+    return _process_oauth_callback(oauth.microsoft)
 
-    session["user"] = {
-        "name": userinfo.get("name"),
-        "email": userinfo.get("email"),
-        "picture": userinfo.get("picture")
-    }
-
-    admin_emails = {"admin@example.com", "anotheradmin@example.com"}  # Add all admin emails here
-    if userinfo.get("email") in admin_emails:
-        role = "admin"
-    else:
-        role = "user"
-
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO users (name, email, picture, access_token, id_token, role)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE
-            name=VALUES(name),
-            picture=VALUES(picture),
-            access_token=VALUES(access_token),
-            id_token=VALUES(id_token),
-            role=VALUES(role)
-    """, (
-        userinfo.get("name"),
-        userinfo.get("email"),
-        userinfo.get("picture"),
-        token.get("access_token"),
-        token.get("id_token"),
-        role
-    ))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    REDIRECT_ADMIN_URL = os.getenv("REDIRECT_ADMIN_URL", "http://localhost:3000/admin")
-    REDIRECT_SELECTION_URL = os.getenv("REDIRECT_SELECTION_URL", "http://localhost:3000/selection")
-    if role == "admin":
-        return redirect(REDIRECT_ADMIN_URL)
-    else:
-        return redirect(REDIRECT_SELECTION_URL)
-
-@app.route("/test-callback", methods=["POST"])
-def test_callback():
-    data = request.json
-    userinfo = data.get("userinfo")
-    token = data.get("token")
-    role = data.get("role", "user")  # Default to 'user' if not provided
-
-    # Save info to session (optional for test)
-    session["user"] = {
-        "name": userinfo["name"],
-        "email": userinfo["email"],
-        "picture": userinfo["picture"]
-    }
-
-    # Save to MySQL database
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO users (name, email, picture, access_token, id_token, role)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE
-            name=VALUES(name),
-            picture=VALUES(picture),
-            access_token=VALUES(access_token),
-            id_token=VALUES(id_token),
-            role=VALUES(role)
-    """, (
-        userinfo["name"],
-        userinfo["email"],
-        userinfo["picture"],
-        token.get("access_token"),
-        token.get("id_token"),
-        role
-    ))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    return {"status": "success", "message": "Test user inserted/updated."}
+#
+# WARNING: This test endpoint is a major security risk.
+# It allows unauthenticated insertion/updating of user data.
+# It should be removed or protected (e.g., by checking FLASK_ENV) in production.
+# I have commented it out for safety.
+#
+# @app.route("/test-callback", methods=["POST"])
+# def test_callback():
+#     data = request.json
+#     userinfo = data.get("userinfo")
+#     token = data.get("token")
+#     role = data.get("role", "user")  # Default to 'user' if not provided
+#
+#     session["user"] = {
+#         "name": userinfo["name"],
+#         "email": userinfo["email"],
+#         "picture": userinfo["picture"]
+#     }
+#
+#     try:
+#         with get_db_connection() as conn:
+#             with conn.cursor() as cur:
+#                 cur.execute("""
+#                     INSERT INTO users (name, email, picture, access_token, id_token, role)
+#                     VALUES (%s, %s, %s, %s, %s, %s)
+#                     ON DUPLICATE KEY UPDATE
+#                         name=VALUES(name), picture=VALUES(picture),
+#                         access_token=VALUES(access_token), id_token=VALUES(id_token),
+#                         role=VALUES(role)
+#                 """, (
+#                     userinfo.get("name"), userinfo.get("email"), userinfo.get("picture"),
+#                     token.get("access_token"), token.get("id_token"), role
+#                 ))
+#                 conn.commit()
+#     except mysql.connector.Error as err:
+#         app.logger.error(f"Database error during test callback: {err}")
+#         return {"status": "error", "message": "Database error"}, 500
+#
+#     return {"status": "success", "message": "Test user inserted/updated."}
 
 if __name__ == "__main__":
-    app.run(debug=True, host="localhost")
-    app.run(debug=True, host="0.0.0.0")
+    # The host '0.0.0.0' makes the server accessible from your network,
+    # which is useful for development and containerization.
+    # The second app.run() call was unreachable.
+    app.run(debug=True, host="0.0.0.0", port=5000)
