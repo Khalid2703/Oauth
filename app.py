@@ -15,6 +15,8 @@ app.secret_key = os.urandom(24)
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID")
+MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET")
 
 oauth = OAuth(app)
 oauth.register(
@@ -24,6 +26,15 @@ oauth.register(
     server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
     client_kwargs={
         "scope": "openid email profile"
+    }
+)
+oauth.register(
+    name='microsoft',
+    client_id=MICROSOFT_CLIENT_ID,
+    client_secret=MICROSOFT_CLIENT_SECRET,
+    server_metadata_url='https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration',
+    client_kwargs={
+        'scope': 'openid email profile'
     }
 )
 
@@ -96,15 +107,73 @@ def callback():
     conn.close()
 
     # Redirect based on role
+    REDIRECT_ADMIN_URL = os.getenv("REDIRECT_ADMIN_URL", "http://localhost:3000/admin")
+    REDIRECT_SELECTION_URL = os.getenv("REDIRECT_SELECTION_URL", "http://localhost:3000/selection")
     if role == "admin":
-        return redirect("https://edtech-six-navy.vercel.app/admin")
+        return redirect(REDIRECT_ADMIN_URL)
     else:
-        return redirect("https://edtech-six-navy.vercel.app/selection")
+        return redirect(REDIRECT_SELECTION_URL)
 
 @app.route("/logout")
 def logout():
     session.clear()
     return "Logged out. You may close this window."
+# Microsoft OAuth login route
+@app.route("/login-microsoft")
+def login_microsoft():
+    nonce = secrets.token_urlsafe(16)
+    session["nonce"] = nonce
+    redirect_uri = url_for("callback_microsoft", _external=True)
+    return oauth.microsoft.authorize_redirect(redirect_uri, nonce=nonce)
+
+# Microsoft OAuth callback route
+@app.route("/callback-microsoft")
+def callback_microsoft():
+    token = oauth.microsoft.authorize_access_token()
+    session["token"] = token
+    userinfo = oauth.microsoft.parse_id_token(token, nonce=session.get("nonce"))
+
+    session["user"] = {
+        "name": userinfo.get("name"),
+        "email": userinfo.get("email"),
+        "picture": userinfo.get("picture")
+    }
+
+    admin_emails = {"admin@example.com", "anotheradmin@example.com"}  # Add all admin emails here
+    if userinfo.get("email") in admin_emails:
+        role = "admin"
+    else:
+        role = "user"
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO users (name, email, picture, access_token, id_token, role)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            name=VALUES(name),
+            picture=VALUES(picture),
+            access_token=VALUES(access_token),
+            id_token=VALUES(id_token),
+            role=VALUES(role)
+    """, (
+        userinfo.get("name"),
+        userinfo.get("email"),
+        userinfo.get("picture"),
+        token.get("access_token"),
+        token.get("id_token"),
+        role
+    ))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    REDIRECT_ADMIN_URL = os.getenv("REDIRECT_ADMIN_URL", "http://localhost:3000/admin")
+    REDIRECT_SELECTION_URL = os.getenv("REDIRECT_SELECTION_URL", "http://localhost:3000/selection")
+    if role == "admin":
+        return redirect(REDIRECT_ADMIN_URL)
+    else:
+        return redirect(REDIRECT_SELECTION_URL)
 
 @app.route("/test-callback", methods=["POST"])
 def test_callback():
@@ -147,4 +216,4 @@ def test_callback():
     return {"status": "success", "message": "Test user inserted/updated."}
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=True, host="0.0.0.0")

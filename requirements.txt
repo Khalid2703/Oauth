@@ -1,0 +1,6 @@
+Flask
+Flask-Cors
+authlib
+python-dotenv
+mysql-connector-python
+requests
