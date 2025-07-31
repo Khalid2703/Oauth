@@ -4,3 +4,4 @@ authlib
 python-dotenv
 mysql-connector-python
 requests
+Werkzeug
