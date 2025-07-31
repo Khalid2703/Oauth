@@ -37,6 +37,9 @@ MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET")
 ADMIN_EMAIL_LIST = os.getenv("ADMIN_EMAILS", "admin@example.com,anotheradmin@example.com")
 ADMIN_EMAILS = set(email.strip() for email in ADMIN_EMAIL_LIST.split(','))
 
+# Frontend URL for CORS and redirects
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
 # OAuth configuration
 oauth = OAuth(app)
 oauth.register(
@@ -50,11 +53,14 @@ oauth.register(
     name='microsoft',
     client_id=MICROSOFT_CLIENT_ID,
     client_secret=MICROSOFT_CLIENT_SECRET,
-    server_metadata_url='https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration',
+    server_metadata_url='https://login.microsoftonline.com/344fd090-c4e0-467a-9e2b-325686b01143/v2.0/.well-known/openid-configuration',
     client_kwargs={'scope': 'openid email profile'}
 )
 
-CORS(app)
+
+# ✅ Secure CORS: Restrict to your frontend's origin for better security.
+# `supports_credentials=True` is needed for sessions/cookies to work across domains.
+CORS(app, origins=[FRONTEND_URL], supports_credentials=True)
 
 def get_db_connection():
     conn = mysql.connector.connect(
@@ -103,39 +109,35 @@ def _process_oauth_callback(provider):
         app.logger.error(f"Database error during OAuth callback: {err}")
         return "A database error occurred. Please try again later.", 500
 
-    REDIRECT_ADMIN_URL = os.getenv("REDIRECT_ADMIN_URL", "http://localhost:3000/admin")
-    REDIRECT_SELECTION_URL = os.getenv("REDIRECT_SELECTION_URL", "http://localhost:3000/selection")
+    # Use the base FRONTEND_URL for redirects
+    REDIRECT_ADMIN_URL = f"{FRONTEND_URL}/admin"
+    REDIRECT_SELECTION_URL = f"{FRONTEND_URL}/selection"
     return redirect(REDIRECT_ADMIN_URL) if role == "admin" else redirect(REDIRECT_SELECTION_URL)
 
-@app.route("/login")
-def login():
+@app.route("/login/<provider_name>")
+def login(provider_name):
+    """Generic login route for any registered OAuth provider."""
+    if provider_name not in oauth._clients:
+        return "Unknown provider", 404
+
     nonce = secrets.token_urlsafe(16)
     session["nonce"] = nonce
-    redirect_uri = url_for("callback", _external=True)
-    print(f"[DEBUG] Google OAuth redirect_uri: {redirect_uri}")
-    return oauth.google.authorize_redirect(redirect_uri, nonce=nonce)
+    # Use the generic callback route
+    redirect_uri = url_for("callback", provider_name=provider_name, _external=True)
+    print(f"[DEBUG] {provider_name.capitalize()} OAuth redirect_uri: {redirect_uri}")
+    return oauth._clients[provider_name].authorize_redirect(redirect_uri, nonce=nonce)
 
-@app.route("/callback")
-def callback():
-    return _process_oauth_callback(oauth.google)
+@app.route("/callback/<provider_name>")
+def callback(provider_name):
+    """Generic callback route for any registered OAuth provider."""
+    if provider_name not in oauth._clients:
+        return "Unknown provider", 404
+    return _process_oauth_callback(oauth._clients[provider_name])
 
 @app.route("/logout")
 def logout():
     session.clear()
     return "Logged out. You may close this window."
-
-@app.route("/login-microsoft")
-def login_microsoft():
-    nonce = secrets.token_urlsafe(16)
-    session["nonce"] = nonce
-    redirect_uri = url_for("callback_microsoft", _external=True)
-    print(f"[DEBUG] Microsoft OAuth redirect_uri: {redirect_uri}")
-    return oauth.microsoft.authorize_redirect(redirect_uri, nonce=nonce)
-
-@app.route("/callback-microsoft")
-def callback_microsoft():
-    return _process_oauth_callback(oauth.microsoft)
-
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=5000)
