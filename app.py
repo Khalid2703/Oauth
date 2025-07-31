@@ -57,6 +57,7 @@ def login():
     nonce = secrets.token_urlsafe(16)
     session["nonce"] = nonce
     redirect_uri = url_for("callback", _external=True)
+    print(f"[DEBUG] Google OAuth redirect_uri: {redirect_uri}")
     return oauth.google.authorize_redirect(redirect_uri, nonce=nonce)
 
 @app.route("/callback")
@@ -124,6 +125,7 @@ def login_microsoft():
     nonce = secrets.token_urlsafe(16)
     session["nonce"] = nonce
     redirect_uri = url_for("callback_microsoft", _external=True)
+    print(f"[DEBUG] Microsoft OAuth redirect_uri: {redirect_uri}")
     return oauth.microsoft.authorize_redirect(redirect_uri, nonce=nonce)
 
 # Microsoft OAuth callback route
