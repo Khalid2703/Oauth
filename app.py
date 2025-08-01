@@ -24,8 +24,6 @@ def before_request():
 
 # Secure session handling
 app.secret_key = os.getenv("FLASK_SECRET_KEY")
-if not app.secret_key:
-    raise ValueError("No FLASK_SECRET_KEY set for Flask application")
 
 # Load OAuth credentials
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
@@ -72,16 +70,18 @@ def get_db_connection():
     )
     return conn
 
-def _process_oauth_callback(provider):
+def _process_oauth_callback(provider_name):
     """Process both Google and Microsoft OAuth callbacks."""
+    provider = oauth._clients[provider_name]
     token = provider.authorize_access_token()
-    session["token"] = token
+    session["token"] = token  # Note: Storing full tokens in session is not always best practice for production
     userinfo = provider.parse_id_token(token, nonce=session.get("nonce"))
     session["user"] = {
         "name": userinfo.get("name"),
         "email": userinfo.get("email"),
         "picture": userinfo.get("picture")
     }
+    session["provider"] = provider_name # Store the provider for logout
     role = "admin" if userinfo.get("email") in ADMIN_EMAILS else "user"
 
     try:
@@ -132,12 +132,33 @@ def callback(provider_name):
     """Generic callback route for any registered OAuth provider."""
     if provider_name not in oauth._clients:
         return "Unknown provider", 404
-    return _process_oauth_callback(oauth._clients[provider_name])
+    return _process_oauth_callback(provider_name)
 
 @app.route("/logout")
 def logout():
+    """Logs the user out of the application and the identity provider."""
+    # Get the provider name and token from the session before clearing it
+    provider_name = session.get("provider")
+    token = session.get("token")
+
+    # Clear the local application session
     session.clear()
-    return "Logged out. You may close this window."
+
+    # If the user logged in with an OAuth provider, redirect to their logout page
+    if provider_name and provider_name in oauth._clients:
+        provider = oauth._clients[provider_name]
+        logout_endpoint = provider.server_metadata.get('end_session_endpoint')
+
+        if logout_endpoint:
+            # For OIDC, it's good practice to include id_token_hint
+            id_token_hint = token.get('id_token') if token else None
+            logout_url = f"{logout_endpoint}?post_logout_redirect_uri={FRONTEND_URL}"
+            if id_token_hint:
+                logout_url += f"&id_token_hint={id_token_hint}"
+            return redirect(logout_url)
+
+    # Fallback redirect to the frontend
+    return redirect(FRONTEND_URL)
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=5000)
