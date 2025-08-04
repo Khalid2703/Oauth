@@ -8,9 +8,18 @@ import mysql.connector
 from flask_cors import CORS
 from werkzeug.middleware.proxy_fix import ProxyFix  # ✅ Added
 
+
 load_dotenv()
 
+# Set session cookie attributes for cross-origin authentication
+
+
 app = Flask(__name__)
+
+app.config.update(
+    SESSION_COOKIE_SAMESITE="None",
+    SESSION_COOKIE_SECURE=True
+)
 
 # ✅ ProxyFix: Respect headers from reverse proxies (e.g. Render)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
@@ -51,8 +60,12 @@ oauth.register(
     name='microsoft',
     client_id=MICROSOFT_CLIENT_ID,
     client_secret=MICROSOFT_CLIENT_SECRET,
-    server_metadata_url='https://login.microsoftonline.com/344fd090-c4e0-467a-9e2b-325686b01143/v2.0/.well-known/openid-configuration',
-    client_kwargs={'scope': 'openid email profile'}
+    server_metadata_url='https://login.microsoftonline.com/5f5f929b-bab9-411e-94aa-23877200991e/v2.0/.well-known/openid-configuration',
+    client_kwargs={
+        'scope': 'openid email profile User.Read'
+    },
+    authorize_url='https://login.microsoftonline.com/5f5f929b-bab9-411e-94aa-23877200991e/oauth2/v2.0/authorize',
+    access_token_url='https://login.microsoftonline.com/5f5f929b-bab9-411e-94aa-23877200991e/oauth2/v2.0/token'
 )
 
 
